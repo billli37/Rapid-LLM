@@ -1,0 +1,41 @@
+!!! WARNING: MoE energy estimates are not reliable.
+!!! WARNING: Router/dispatch/combine (and some MoE-specific comms) are not modeled in energy.
+!!! WARNING: Treat reported energy numbers as lower bounds for MoE runs.
+!!! WARNING: MoE energy estimates are not reliable.
+!!! WARNING: Router/dispatch/combine (and some MoE-specific comms) are not modeled in energy.
+!!! WARNING: Treat reported energy numbers as lower bounds for MoE runs.
+[decode] sample step 0: seq_len=2049, time=0.1488s
+!!! WARNING: MoE energy estimates are not reliable.
+!!! WARNING: Router/dispatch/combine (and some MoE-specific comms) are not modeled in energy.
+!!! WARNING: Treat reported energy numbers as lower bounds for MoE runs.
+[decode] sample step 255: seq_len=2304, time=0.1489s
+[decode] integration segment 0->255: width=255, midpoint=0.1489s, contribution=37.9620s
+[decode] total interpolated decode time: 38.1108s, energy: 1.1903J from 2 samples
+[prefill] time: 0.7406s, [decode] time: 38.1108s, [total] time: 38.8515s
+[kv-cache] prefill_store=1.5 GiB, decode_store=0.2 GiB, decode_fetch=408.0 GiB
+[prefill] energy: 1.12J, energy/tok: 68.57µJ [decode] energy: 1.19J, energy/tok: 581.20µJ [total] energy: 2.31J, energy/tok: 125.53µJ
+
+
+============================================================
+TOPOLOGY/NETWORK
+============================================================
+Parallelisms: tp:1, cp:1, ep:1, pp:1, dp:1
+Network Topology [dims=3]
+  • dim0 torus2d_tp : tp 1 × cp 1 × ep 1 ⇒ size 1
+  • dim1 inter_torus_infiniband : pp 1 × dp 1 ⇒ size 1
+  • dim2 inter_torus_infiniband_dp : (none) ⇒ size 1
+  replica_count: 1 (throughput-only)
+  => aggregate = 1 GPUs per modeled replica
+  => effective total GPUs = 1
+============================================================
+RESULTS
+============================================================
+LLM inference time: 38.85s (mode=analytical)
+LLM time to first token: 0.89s
+Decode sequences/s: start=6.72, mid(token 128)=6.72, end=6.71
+Aggregate decode throughput tok/s (batch=8, replica_count=1): start=53.76, mid(token 128)=53.74, end=53.72
+LLM inference results written to output/LLM/LLM_inference_results.txt
+============================================================
+RAPID-LLM wall-clock time: 5.47s
+
+
