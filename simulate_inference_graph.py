@@ -54,6 +54,9 @@ class InferenceConfig:
     tp_sp: bool = False  # sequence-parallel toggle
     # Decode sampling configuration
     sample_every: int = 32  # Sample every N decode steps
+    decode_schedule: str = "autoregressive"  # "autoregressive" or "block_diffusion"
+    block_size: int = 1
+    refine_rounds: int = 0
 
 @dataclass
 class DecodeSample:

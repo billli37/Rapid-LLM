@@ -1008,6 +1008,19 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             print("Skipping decode")
             return 0.0, 0.0, []
 
+        # Decode schedule resolution
+        inf_param = getattr(self._raw_model_config, "inference_config", None)
+        decode_schedule = getattr(inf_param, "decode_schedule", "autoregressive") if inf_param else "autoregressive"
+        bd = getattr(inf_param, "block_diffusion", None) if inf_param else None
+        block_size = getattr(bd, "block_size", 1) if bd else 1
+        refine_rounds = getattr(bd, "refine_rounds", 0) if bd else 0
+        if decode_schedule == "autoregressive" and hasattr(self, "project_param") and self.project_param:
+            proj_sched = str(self.project_param.get("decode_schedule", "")).strip().lower()
+            if proj_sched == "block_diffusion":
+                decode_schedule = proj_sched
+                block_size = int(self.project_param.get("block_size", 1))
+                refine_rounds = int(self.project_param.get("refine_rounds", 0))
+
         # Create inference configuration from model parameters
         inference_config = InferenceConfig(
             batch_size=self._effective_transformer_batch(),
@@ -1028,6 +1041,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             tp_sp=self.tp_sp,
             moe_dp=self.moe_dp,
             sample_every=sample_every,
+            decode_schedule=decode_schedule,
+            block_size=block_size,
+            refine_rounds=refine_rounds,
         )
 
 

@@ -1925,22 +1925,74 @@ class LLMConfig:
 
 
 @dataclass
+class BlockDiffusionConfig:
+    block_size: int = 1
+    refine_rounds: int = 0
+
+
+@dataclass
 class LLMInferenceConfig:
     sample_every: int = -1
+    decode_schedule: str = "autoregressive"
+    block_diffusion: Optional[BlockDiffusionConfig] = None
 
     @classmethod
-    def from_dict(cls, inference_dict: Optional[Dict[str, object]]) -> "LLMInferenceConfig":
-        if not inference_dict:
-            return cls(sample_every=-1)
-        inference_dict = _require_mapping("inference_param", inference_dict)
-        raw = inference_dict.get("sample_every", -1)
+    def from_dict(
+        cls,
+        inference_dict: Optional[Dict[str, object]] = None,
+        project_param: Optional[Dict[str, object]] = None,
+    ) -> "LLMInferenceConfig":
+        inf_dict = dict(inference_dict or {}) if isinstance(inference_dict, dict) else {}
+        proj_dict = dict(project_param or {}) if isinstance(project_param, dict) else {}
+
+        raw_sample = inf_dict.get("sample_every", -1)
         try:
-            sample_every = int(raw)
+            sample_every = int(raw_sample)
         except (TypeError, ValueError) as exc:
             raise ValueError(
-                f"inference_param.sample_every must be an integer (got {raw!r})"
+                f"inference_param.sample_every must be an integer (got {raw_sample!r})"
             ) from exc
-        return cls(sample_every=sample_every)
+
+        # Decode schedule resolution (hybrid: inference_param prioritized over project_param)
+        raw_schedule = inf_dict.get("decode_schedule") or proj_dict.get("decode_schedule") or "autoregressive"
+        decode_schedule = str(raw_schedule).strip().lower()
+
+        block_diffusion = None
+        if decode_schedule == "block_diffusion":
+            bd_dict = {}
+            if isinstance(inf_dict.get("block_diffusion"), dict):
+                bd_dict.update(inf_dict["block_diffusion"])
+            if isinstance(proj_dict.get("block_diffusion"), dict):
+                bd_dict.update(proj_dict["block_diffusion"])
+
+            if "block_size" in inf_dict:
+                bd_dict["block_size"] = inf_dict["block_size"]
+            elif "block_size" in proj_dict:
+                bd_dict["block_size"] = proj_dict["block_size"]
+
+            if "refine_rounds" in inf_dict:
+                bd_dict["refine_rounds"] = inf_dict["refine_rounds"]
+            elif "refine_rounds" in proj_dict:
+                bd_dict["refine_rounds"] = proj_dict["refine_rounds"]
+
+            b_val = bd_dict.get("block_size", 1)
+            r_val = bd_dict.get("refine_rounds", 0)
+            try:
+                block_size = int(b_val)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"block_diffusion.block_size must be an integer (got {b_val!r})") from exc
+            try:
+                refine_rounds = int(r_val)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"block_diffusion.refine_rounds must be an integer (got {r_val!r})") from exc
+
+            block_diffusion = BlockDiffusionConfig(block_size=block_size, refine_rounds=refine_rounds)
+
+        return cls(
+            sample_every=sample_every,
+            decode_schedule=decode_schedule,
+            block_diffusion=block_diffusion,
+        )
 def _coerce_int(value: object, context: str, *, min_value: Optional[int] = 1) -> int:
     try:
         parsed = int(value)
@@ -2409,7 +2461,10 @@ def parse_config(filename, config_type):
         model_config = LLMConfig.from_dict(config_dict["model_param"])
         inference_config = None
         if model_config.run_type == "inference":
-            inference_config = LLMInferenceConfig.from_dict(config_dict.get("inference_param"))
+            inference_config = LLMInferenceConfig.from_dict(
+                config_dict.get("inference_param"),
+                project_param=project_param,
+            )
         config = ModelConfig(model_config=model_config, inference_config=inference_config,
                              project_param=project_param)
     else:
@@ -2502,6 +2557,20 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
             )
         if model.decode_len is not None and model.decode_len > model.seq_len:
             raise ValueError("model_param.decode_len must be <= seq_len for inference")
+        inf_cfg = getattr(model_config, "inference_config", None)
+        if inf_cfg and getattr(inf_cfg, "decode_schedule", "") == "block_diffusion":
+            bd = getattr(inf_cfg, "block_diffusion", None)
+            if bd is None:
+                raise ValueError("decode_schedule is 'block_diffusion' but block_diffusion settings are missing")
+            if bd.block_size < 1:
+                raise ValueError(f"block_diffusion.block_size must be >= 1 (got {bd.block_size})")
+            if bd.refine_rounds < 0:
+                raise ValueError(f"block_diffusion.refine_rounds must be >= 0 (got {bd.refine_rounds})")
+            decode_len = int(getattr(model, "decode_len", 0) or 0)
+            if decode_len > 0 and decode_len % bd.block_size != 0:
+                raise ValueError(
+                    f"model_param.decode_len ({decode_len}) must be divisible by block_diffusion.block_size ({bd.block_size})"
+                )
         if model.is_vit:
             if model.decode_len not in (0, None):
                 raise ValueError("model_param.decode_len must be 0 for ViT inference")
