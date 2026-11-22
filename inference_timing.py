@@ -1097,11 +1097,33 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         decode_len = self.model.decode_len
         num_layers = self.num_layers
 
+        inf_param = getattr(self._raw_model_config, "inference_config", None)
+        decode_schedule = getattr(inf_param, "decode_schedule", "autoregressive") if inf_param else "autoregressive"
+        bd = getattr(inf_param, "block_diffusion", None) if inf_param else None
+        block_size = getattr(bd, "block_size", 1) if bd else 1
+        refine_rounds = getattr(bd, "refine_rounds", 0) if bd else 0
+        if decode_schedule == "autoregressive" and hasattr(self, "project_param") and self.project_param:
+            proj_sched = str(self.project_param.get("decode_schedule", "")).strip().lower()
+            if proj_sched == "block_diffusion":
+                decode_schedule = proj_sched
+                block_size = int(self.project_param.get("block_size", 1))
+                refine_rounds = int(self.project_param.get("refine_rounds", 0))
+
         prefill_store_bytes = token_bytes * prefill_len * num_layers
         decode_store_bytes = token_bytes * decode_len * num_layers
-        decode_fetch_bytes = token_bytes * num_layers * (
-            decode_len * (prefill_len + self.seq_len) // 2
-        )
+        if decode_schedule == "block_diffusion" and block_size > 1:
+            n_blocks = decode_len // block_size
+            fetch_tokens = (refine_rounds + 1) * (
+                n_blocks * prefill_len + block_size * n_blocks * (n_blocks - 1) // 2
+            )
+            decode_fetch_bytes = token_bytes * num_layers * fetch_tokens
+            decode_calls = n_blocks * (refine_rounds + 1)
+        else:
+            decode_fetch_bytes = token_bytes * num_layers * (
+                decode_len * (prefill_len + self.seq_len) // 2
+            )
+            decode_calls = decode_len
+        model_calls = (1 if prefill_len > 0 else 0) + decode_calls
 
         def _to_gib(byte_val: int) -> str:
             gib_val = byte_val / (1024 ** 3)
@@ -1112,7 +1134,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         if decode_samples:
             # do NOT use effective_transformer_batch here
-            decode_rates = self._decode_token_rates(decode_samples, decode_len, decode_time, self.batch_size)
+            decode_rates = self._decode_token_rates(
+                decode_samples, decode_len, decode_time, self.batch_size, block_size=block_size
+            )
         else:
             decode_rates = None
 
@@ -1151,6 +1175,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             "kv_cache_decode_store_bytes": decode_store_bytes,
             "kv_cache_decode_fetch_bytes": decode_fetch_bytes,
             "decode_tokens_per_s": decode_rates,
+            "decode_calls": decode_calls,
+            "model_calls": model_calls,
         }
 
     @staticmethod
@@ -1159,6 +1185,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         decode_len: int,
         total_decode_time: float,
         batch_size: int,
+        block_size: int = 1,
     ) -> Dict[str, float]:
         if decode_len <= 0:
             return {}
@@ -1166,18 +1193,27 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         def token_time_at(step: int) -> float:
             if not samples:
                 return 0.0
-            if step <= samples[0].step_id:
-                return samples[0].execution_time
-            for idx in range(1, len(samples)):
-                prev = samples[idx - 1]
-                curr = samples[idx]
-                if step <= curr.step_id:
-                    gap = curr.step_id - prev.step_id
-                    if gap <= 0:
-                        return curr.execution_time
-                    ratio = (step - prev.step_id) / gap
-                    return prev.execution_time + ratio * (curr.execution_time - prev.execution_time)
-            return samples[-1].execution_time
+            # If samples are block-level (block_size > 1), map token step to block index
+            block_idx = (step // block_size) if block_size > 1 else step
+            if block_idx <= samples[0].step_id:
+                raw_time = samples[0].execution_time
+            elif block_idx >= samples[-1].step_id:
+                raw_time = samples[-1].execution_time
+            else:
+                raw_time = samples[-1].execution_time
+                for idx in range(1, len(samples)):
+                    prev = samples[idx - 1]
+                    curr = samples[idx]
+                    if block_idx <= curr.step_id:
+                        gap = curr.step_id - prev.step_id
+                        if gap <= 0:
+                            raw_time = curr.execution_time
+                        else:
+                            ratio = (block_idx - prev.step_id) / gap
+                            raw_time = prev.execution_time + ratio * (curr.execution_time - prev.execution_time)
+                        break
+            # Return time per token (for block_size > 1, sample execution_time is block time)
+            return (raw_time / block_size) if block_size > 1 else raw_time
 
         def safe_rate(token_time: float) -> float:
             if token_time <= 0.0:

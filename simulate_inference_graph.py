@@ -80,15 +80,24 @@ class DecodeGraph(Graph):
     def __init__(
         self,
         config: InferenceConfig,
-        hw_config,
-        model_config,
-        time_calc_cls: Callable[..., Any],
-        use_moe,
-        num_experts,
-        top_k,
+        hw_config=None,
+        model_config=None,
+        time_calc_cls: Optional[Callable[..., Any]] = None,
+        use_moe=False,
+        num_experts=1,
+        top_k=1,
         *args,
         **kwargs,
     ):
+        if "mode" not in kwargs:
+            kwargs.setdefault("mode", "inference")
+            kwargs.setdefault("dp", 1)
+            kwargs.setdefault("pp", getattr(config, "pp", 1))
+            kwargs.setdefault("tp", getattr(config, "tp", 1))
+            kwargs.setdefault("cp", getattr(config, "cp", 1))
+            kwargs.setdefault("comp_times", {})
+            kwargs.setdefault("comm_metadata", {})
+            kwargs.setdefault("misc_metadata", {"sequence_parallel": getattr(config, "tp_sp", False)})
         super().__init__(*args, **kwargs)
         self.config = config
         self.hw_config = hw_config
@@ -131,9 +140,17 @@ class DecodeGraph(Graph):
 
         # Execute graphs at sample points
         decode_samples = []
-        query_tokens = 1  # Course helper H2: new tokens per decode call (Projects 3 and 4)
+        is_block_diffusion = (self.config.decode_schedule == "block_diffusion")
+        block_size = max(1, getattr(self.config, "block_size", 1)) if is_block_diffusion else 1
+        refine_rounds = max(0, getattr(self.config, "refine_rounds", 0)) if is_block_diffusion else 0
+        passes_per_block = (refine_rounds + 1) if is_block_diffusion else 1
+        query_tokens = block_size 
+
         for step_id in sample_points:
-            generated_tokens = step_id + 1
+            if is_block_diffusion:
+                generated_tokens = (step_id + 1) * block_size
+            else:
+                generated_tokens = step_id + 1
             total_seq_len = self.config.seq_len + generated_tokens
 
             gemm_shapes = llm_util.process_decode_gemm_shapes(
@@ -156,12 +173,16 @@ class DecodeGraph(Graph):
                 query_tokens=query_tokens,
             )
 
+            # In block diffusion, each block executes (refine_rounds + 1) passes
+            block_time = passes_per_block * sample_time
+            block_energy = passes_per_block * sample_energy
+
             decode_samples.append(
                 DecodeSample(
                     step_id=step_id,
                     current_seq_len=total_seq_len,
-                    execution_time=sample_time,
-                    execution_energy=sample_energy,
+                    execution_time=block_time,
+                    execution_energy=block_energy,
                     graph_root=None,
                     kv_cache_tokens=total_seq_len,
                 )
@@ -175,16 +196,28 @@ class DecodeGraph(Graph):
         """Generate decode step sample points based on sampling configuration."""
         sample_points = []
 
-        # Always sample step 0 (first decode step)
+        is_block_diffusion = (self.config.decode_schedule == "block_diffusion")
+        block_size = max(1, getattr(self.config, "block_size", 1)) if is_block_diffusion else 1
+        total_units = (self.config.decode_len // block_size) if is_block_diffusion else self.config.decode_len
+        sample_every = self.config.sample_every
+        if sample_every <= 0:
+            sample_every = 2**31 - 1
+        interval = max(1, sample_every // block_size) if is_block_diffusion else sample_every
+
+        if total_units <= 0:
+            return [0]
+
+        # Always sample step 0 (first decode step / block)
         sample_points.append(0)
 
         # Sample at regular intervals
-        for step_id in range(self.config.sample_every - 1, self.config.decode_len, self.config.sample_every):
-            sample_points.append(step_id)
+        for step_id in range(interval - 1, total_units, interval):
+            if step_id not in sample_points:
+                sample_points.append(step_id)
 
         # Always sample the last step if configured
-        last_step = self.config.decode_len - 1
-        if last_step not in sample_points:
+        last_step = total_units - 1
+        if last_step not in sample_points and last_step >= 0:
             sample_points.append(last_step)
 
         return sorted(sample_points)
@@ -318,7 +351,10 @@ class DecodeGraph(Graph):
             )
 
         last_sample = samples[-1]
-        remaining_steps = self.config.decode_len - (last_sample.step_id + 1)
+        is_block_diffusion = (self.config.decode_schedule == "block_diffusion")
+        block_size = max(1, getattr(self.config, "block_size", 1)) if is_block_diffusion else 1
+        total_units = (self.config.decode_len // block_size) if is_block_diffusion else self.config.decode_len
+        remaining_steps = total_units - (last_sample.step_id + 1)
         if remaining_steps > 0:
             tail_time = remaining_steps * last_sample.execution_time
             total_time += tail_time
