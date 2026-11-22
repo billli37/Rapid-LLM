@@ -970,6 +970,19 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
 
     decode_peak_gb = 0.0
     if decode_len > 0:
+        inf_param = getattr(exp_model_config, "inference_config", None)
+        bd = getattr(inf_param, "block_diffusion", None) if inf_param else None
+        block_size = getattr(bd, "block_size", 1) if bd else 1
+        decode_schedule = getattr(inf_param, "decode_schedule", "autoregressive") if inf_param else "autoregressive"
+        proj_param = getattr(exp_model_config, "project_param", None) or getattr(tc, "project_param", {}) or {}
+        if decode_schedule == "autoregressive" and proj_param:
+            proj_sched = str(proj_param.get("decode_schedule", "")).strip().lower()
+            if proj_sched == "block_diffusion":
+                decode_schedule = proj_sched
+                block_size = int(proj_param.get("block_size", 1))
+
+        query_tokens = block_size if decode_schedule == "block_diffusion" else 1
+
         decode_gemm_shapes = process_decode_gemm_shapes(
             tc,
             batch_size=batch_size,
@@ -980,6 +993,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             intermediate_size=tc.moe_intermediate_size if tc.use_moe else intermediate_size,
             vocab_size=vocab_size,
             model_type=tc.model_type,
+            query_tokens=query_tokens,
         )
         (
             decode_pipeline_graph,
@@ -997,6 +1011,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             batch_size=batch_size,
             total_seq_len=seq_len,
             gemm_shapes=decode_gemm_shapes,
+            query_tokens=query_tokens,
         )
         decode_dispatcher = LLMExecutionDispatcher(
             time_calc=tc,
@@ -1014,7 +1029,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
         decode_memory_data = mem_estimator.build_memory_data(
             mode="inference",
             batch_size=batch_size,
-            seq_len=1,
+            seq_len=query_tokens,
             gemm_shapes=decode_gemm_shapes,
             kv_cache_tokens=0 if getattr(tc, "disable_kv_cache", False) else seq_len,
         )

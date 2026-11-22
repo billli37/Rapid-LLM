@@ -886,6 +886,18 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         decode_peak_gb = prefill_peak_gb
         if decode_len > 0:
+            inf_param = getattr(self._raw_model_config, "inference_config", None)
+            decode_schedule = getattr(inf_param, "decode_schedule", "autoregressive") if inf_param else "autoregressive"
+            bd = getattr(inf_param, "block_diffusion", None) if inf_param else None
+            block_size = getattr(bd, "block_size", 1) if bd else 1
+            if decode_schedule == "autoregressive" and hasattr(self, "project_param") and self.project_param:
+                proj_sched = str(self.project_param.get("decode_schedule", "")).strip().lower()
+                if proj_sched == "block_diffusion":
+                    decode_schedule = proj_sched
+                    block_size = int(self.project_param.get("block_size", 1))
+
+            decode_query_tokens = block_size if decode_schedule == "block_diffusion" else 1
+
             decode_gemm_shapes = llm_util.process_decode_gemm_shapes(
                 self,
                 batch_size=batch_size,
@@ -896,7 +908,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 intermediate_size=self.moe_intermediate_size if self.use_moe else intermediate_size,
                 vocab_size=vocab_size,
                 model_type=self.model_type,
-                query_tokens=1,  # H2: tokens per decode call for the decode memory peak
+                query_tokens=decode_query_tokens,
             )
             (
                 decode_pipeline_graph,
@@ -914,7 +926,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 batch_size=batch_size,
                 total_seq_len=self.seq_len,
                 gemm_shapes=decode_gemm_shapes,
-                query_tokens=1,
+                query_tokens=decode_query_tokens,
             )
             decode_dispatcher = LLMExecutionDispatcher(
                 time_calc=self,
@@ -932,7 +944,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             decode_memory_data = mem_estimator.build_memory_data(
                 mode="inference",
                 batch_size=batch_size,
-                seq_len=1,
+                seq_len=decode_query_tokens,
                 gemm_shapes=decode_gemm_shapes,
                 kv_cache_tokens=self.seq_len,
             )
