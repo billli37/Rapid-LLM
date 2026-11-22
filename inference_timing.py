@@ -138,7 +138,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         mla_decode = str(getattr(self, "attention_type", "mha")).lower() == "mla" and run_type == "inference"
 
 
-        output_seq_len = 1  # tokens per decode call; query_tokens (H2) is threaded but unused
+        output_seq_len = query_tokens  # tokens per decode call
 
         transformer_timings: Dict[str, OperationTiming] = {}
 
